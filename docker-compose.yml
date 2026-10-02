@@ -1,0 +1,57 @@
+# ─── Podman Compose ───────────────────────────────────────────────────────────
+# Run with:  podman-compose up --build
+# Stop with: podman-compose down
+#
+# Podman runs rootless by default. The API container already uses a non-root
+# user (appuser) in the Dockerfile, so no extra changes are needed there.
+#
+# On Linux/macOS: containers share the default podman network automatically.
+# On Windows (Podman Desktop): the Podman Machine provides the same behaviour.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nom-nom-postgres
+    # "always" is not supported in rootless Podman without a systemd unit.
+    # Use "on-failure" instead, which works reliably with podman-compose.
+    restart: on-failure
+    environment:
+      POSTGRES_USER: nomnom
+      POSTGRES_PASSWORD: nomnom
+      POSTGRES_DB: nomnomdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nomnom -d nomnomdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: nom-nom-api
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - apps/api/.env
+    environment:
+      # "postgres" resolves to the postgres container via the shared podman network
+      DATABASE_URL: postgresql://nomnom:nomnom@postgres:5432/nomnomdb
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local

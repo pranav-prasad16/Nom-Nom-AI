@@ -1,0 +1,648 @@
+// Nom Nom AI — Prisma Schema
+// Phase 1: 18 tables across 5 domains
+//
+// Key changes from initial design:
+//   REMOVED:  MealPlan, MealPlanItem
+//   RENAMED:  MealLog → NutritionLog (consumption record, not planning)
+//   MODIFIED: UserProfile — added age, height, weight, activityLevel for nutrition calculations
+//   MODIFIED: FoodNutrition — explicit macro columns incl. fiber; basisQty/basisUnit replace per100g boolean
+//   MODIFIED: Recipe — added sourceType (AI_GENERATED | USER_CREATED)
+//   ADDED:    ActivityLevel enum, RecipeSourceType enum
+//
+// Schema hardening (design phase — no migration needed, no existing data):
+//   MODIFIED: RecipeStep — FK changed from recipeId (Recipe) → recipeVersionId (RecipeVersion)
+//             Steps are now version-scoped: each RecipeVersion has its own independent steps.
+//             Regenerating a recipe creates a new RecipeVersion + new steps without overwriting old ones.
+//   MODIFIED: RecipeVersion — added recipeSteps relation + updated description field comment
+//             description is now the short summary subtitle; recipeSteps holds structured instructions
+//   MODIFIED: RecipeVersion.servings — removed @default(2); field is now NOT NULL with no default.
+//             Rationale: servings is always explicitly provided by the user or Recipe Agent at generation
+//             time. A silent default masked potential bugs — if omitted, it now fails loudly instead of
+//             silently storing wrong data that corrupts every downstream nutrition calculation.
+//             Removing the default also surfaced a real bug: nutritionLog.ts USER_CREATED flow was
+//             never passing servings to RecipeVersion — fixed by adding recipeServings to createAndLogSchema.
+//   MODIFIED: Recipe — removed recipeSteps relation (steps accessed via recipeVersions[latest].recipeSteps)
+//   ADDED:    UserSavedRecipe table — junction table for bookmarking recipes
+//             userId + recipeId composite PK, savedAt for recency sorting
+//             onDelete Cascade on both sides — no orphaned bookmarks
+//   ADDED:    recipeId param to POST /api/recipes/generate + RecipeGenerateParams
+//             absent → create new Recipe; present → create new RecipeVersion (branch logic TODO)
+//   MODIFIED: Recipe.cuisineType changed from free-form String → CuisineType enum
+//             11 values: NORTH_INDIAN, SOUTH_INDIAN, EAST_INDIAN, WEST_INDIAN (all Indian regions),
+//             CHINESE, ITALIAN, MEXICAN, MIDDLE_EASTERN, THAI, CONTINENTAL, OTHER
+//             Default changed from "Indian" → NORTH_INDIAN
+//             User selects cuisine at generation time → passed to Recipe Agent for accurate generation
+//             Community feed cuisine filter now uses exact enum match (no more case-insensitive string)
+//   REMOVED:  Edamam integration — NutritionService now uses LLM Nutrition Resolver as sole path
+//             FoodNutrition.source default changed from "edamam" → "llm_estimate"
+//             analyze() function removed from NutritionService (was Edamam-only)
+//   ADDED:    create_ingredient tool in Recipe Agent — auto-creates Ingredient + IngredientAlias rows
+//             when user provides an ingredient not yet in the DB; category set via IngredientCategory enum
+//   MODIFIED: create_ingredient tool — name field enforces canonical English naming via system prompt rule
+//             and tool description. Regional/vernacular input (e.g. "tamatar") must NOT become the
+//             ingredient name — it must be converted to the canonical English name ("tomato") and added
+//             as an alias instead. Phase 2 will add server-side LLM canonicalisation as a hard guarantee.
+//   MODIFIED: search_ingredients tool — now explicitly searches both ingredients.name and
+//             ingredient_aliases.alias in one OR query (was already correct in code, now documented)
+//   MODIFIED: get_nutrition tool — description updated; now routes to LLM Resolver only (no Edamam)
+//   MODIFIED: Ingredient — category changed from free-form String? → IngredientCategory enum
+//   REMOVED:  Ingredient.recipeIngredients relation — navigation always goes Recipe→Ingredient, never reverse
+//   REMOVED:  Ingredient.pantryEvents relation — audit log always queried from pantry side, never ingredient side
+//   REMOVED:  SPICE category entirely — spices assumed always available; macro contribution negligible in Phase 1
+//             Recipe Agent system prompt instructs LLM to assume standard Indian spices are available.
+//             Affected seed ingredients (garlic, ginger, cumin, turmeric, coriander, chili, mustard seeds)
+//             removed from the ingredient/nutrition system — referenced only in recipe descriptions.
+//   ADDED:    IngredientCategory enum (VEGETABLE, FRUIT, GRAIN, LEGUME, DAIRY, MEAT, SEAFOOD, EGG,
+//             NUT_AND_SEED, OIL_AND_FAT) — 10 categories covering all macro-contributing food types
+//   MODIFIED: UserGoal — goalType changed from free-form String → GoalType enum (DB-level constraint)
+//   REMOVED:  UserGoal.unit — redundant column; unit is now derived from goalType in backend code
+//             Mapping: LOSE/MAINTAIN/GAIN_WEIGHT→"kg", DAILY_CALORIES→"kcal", DAILY_*→"g"
+//             See GoalService.getUnitForGoalType() for the authoritative mapping.
+//   ADDED:    GoalType enum (LOSE_WEIGHT, MAINTAIN_WEIGHT, GAIN_WEIGHT, DAILY_CALORIES,
+//             DAILY_PROTEIN, DAILY_CARBS, DAILY_FAT, DAILY_FIBER)
+//   MODIFIED: DietaryPreference.name changed from free-form String → DietaryPreferenceType enum
+//   ADDED:    DietaryPreference.llmConstraint — explicit FORBIDDEN/ALLOWED list for AI system prompts,
+//             separate from description (human-readable UI tooltip)
+//   ADDED:    DietaryPreferenceType enum (VEGETARIAN, VEGAN, NONVEGETARIAN, PESCATARIAN,
+//             EGGETARIAN, SATVIC, JAIN)
+//             Note: VEGETARIAN excludes eggs (Indian standard). NONVEGETARIAN excludes beef.
+//   ADDED:    PantryEvent.unit — was missing; now copied from PantryItem.unit at event-creation time.
+//             Makes the audit log self-contained (no join needed to read "500g removed").
+//             Free-form String (not enum) — same reasoning as PantryItem.unit: pantry units reflect
+//             how users store/buy things (kg, litre, bunch, packet) and can't be restricted to a fixed list.
+//
+// Nutrition calculation rule (all arithmetic is done in backend code, never by the LLM):
+//   nutrient_consumed = (food_nutrition.value / food_nutrition.basisQty)
+//                       × recipe_ingredient.quantity        ← scaled to ingredient qty in recipe
+//                       × nutrition_log.servings            ← scaled to servings eaten
+//   Sum across all RecipeIngredients for a recipe total.
+//   Sum across all NutritionLogs for the day for daily totals.
+//
+// FoodNutrition as nutrition cache:
+//   1. Look up food_nutrition by ingredientId.
+//   2. If missing → call LLM for an approximate per-100g value → store result (source = "llm_estimate").
+//   3. All subsequent requests use the stored value — LLM is not called again for the same ingredient.
+//   4. Phase 2 will replace llm_estimate rows with verified nutrition-database values.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACK
+}
+
+enum PantryEventType {
+  ADDED
+  REMOVED
+  USED
+}
+
+// Used in UserProfile to derive daily calorie/macro targets via Mifflin-St Jeor or similar formula.
+enum ActivityLevel {
+  SEDENTARY           // desk job, little/no exercise
+  LIGHTLY_ACTIVE      // light exercise 1–3 days/week
+  MODERATELY_ACTIVE   // moderate exercise 3–5 days/week
+  HIGHLY_ACTIVE       // hard exercise 6–7 days/week
+}
+
+// Distinguishes who/what created the recipe.
+// Both types use the same Recipe → RecipeIngredient → FoodNutrition nutrition calculation path.
+enum RecipeSourceType {
+  AI_GENERATED  // created by the Recipe Agent
+  USER_CREATED  // manually entered by the user (e.g. "Egg Toast I made at home")
+}
+
+// Cuisine classification for recipes.
+// Covers all Indian geographic regions + popular international cuisines eaten in India.
+// Used for:
+//   1. User selection at recipe generation time — tells the agent which regional style to generate
+//   2. Community feed filtering — always consistent since it's an enum (no case/spelling variants)
+//
+// Default is NORTH_INDIAN — most seed recipes and common home cooking in India is North Indian.
+// USER_CREATED recipes that don't fit a specific cuisine should use OTHER.
+enum CuisineType {
+  // ── Indian regional — covers all geographic regions ───────────────────────
+  NORTH_INDIAN    // Punjab, Delhi, UP, Himachal, Uttarakhand, J&K — butter chicken, dal makhani, roti
+  SOUTH_INDIAN    // Tamil Nadu, Kerala, Karnataka, Andhra, Telangana — dosa, idli, sambar, rasam
+  EAST_INDIAN     // West Bengal, Odisha, Bihar, Jharkhand, North-East — fish curry, mishti doi, thukpa
+  WEST_INDIAN     // Maharashtra, Gujarat, Goa, Rajasthan — vada pav, dhokla, dal baati, goan curry
+
+  // ── Popular international cuisines in India ────────────────────────────────
+  CHINESE         // includes Indo-Chinese — Manchurian, hakka noodles, fried rice
+  ITALIAN         // pizza, pasta, risotto
+  MEXICAN         // tacos, burritos, quesadillas
+  MIDDLE_EASTERN  // shawarma, hummus, falafel, kebabs
+  THAI            // curries, pad thai, stir fries
+  CONTINENTAL     // Western European catch-all — grilled dishes, sandwiches, baked items
+
+  // ── Fallback ──────────────────────────────────────────────────────────────
+  OTHER           // fusion, unclassified, or user-created recipes that don't fit above
+}
+
+// All valid dietary preference types a user can select.
+// Replaces the previous free-form String name field on DietaryPreference.
+//
+// Each value maps to a DietaryPreference row in the DB which holds:
+//   description   — human-readable UI tooltip shown in the preference picker
+//   llmConstraint — explicit FORBIDDEN/ALLOWED list injected into AI system prompts
+//
+// Adding a new preference requires: (1) adding the enum value here, (2) running a migration,
+// (3) adding the seed row in prisma/seed.ts with both description and llmConstraint.
+enum DietaryPreferenceType {
+  VEGETARIAN    // No meat, fish, or eggs. Dairy allowed. (Indian standard)
+  VEGAN         // No animal products whatsoever
+  NONVEGETARIAN // No restrictions — all meats except beef, fish, eggs, dairy allowed
+  PESCATARIAN   // No meat; fish, seafood, eggs, dairy allowed
+  EGGETARIAN    // Vegetarian + eggs allowed; no meat or fish
+  SATVIC        // Plant-based; no onion, garlic, or stimulants (Ayurvedic)
+  JAIN          // No meat, fish, eggs, or root vegetables (onion, garlic, potato, etc.)
+}
+
+// All valid goal types a user can set.
+// Replaces the previous free-form String field on UserGoal.
+//
+// Unit is NOT stored as a column — it is fully determined by goalType and derived in backend code:
+//   LOSE_WEIGHT | MAINTAIN_WEIGHT | GAIN_WEIGHT  →  "kg"
+//   DAILY_CALORIES                               →  "kcal"
+//   DAILY_PROTEIN | DAILY_CARBS | DAILY_FAT | DAILY_FIBER  →  "g"
+//
+// See GoalService.getUnitForGoalType() for the authoritative mapping.
+enum GoalType {
+  // ── Body-weight goals ──────────────────────────────────────────────────────
+  LOSE_WEIGHT       // targetValue: user's target body weight (kg)
+  MAINTAIN_WEIGHT   // targetValue: copied from UserProfile.weight at goal-creation time (kg)
+  GAIN_WEIGHT       // targetValue: user's target body weight (kg)
+
+  // ── Daily nutrition targets ────────────────────────────────────────────────
+  DAILY_CALORIES    // targetValue: daily calorie target (kcal)
+  DAILY_PROTEIN     // targetValue: daily protein target (g)
+  DAILY_CARBS       // targetValue: daily carbohydrate target (g)
+  DAILY_FAT         // targetValue: daily fat target (g)
+  DAILY_FIBER       // targetValue: daily fiber target (g)
+}
+
+
+
+// Categorises an ingredient by what it physically is — not by nutrient content or dietary classification.
+// Nutrient properties belong in FoodNutrition. Dietary classifications belong in DietaryPreference.
+// This category is used for pantry filtering (e.g. show only DAIRY items).
+//
+// SPICE is intentionally excluded:
+//   - Spice macro contribution is negligible at cooking quantities (2–5g per dish)
+//   - Micronutrients (where spices are rich) are Phase 2
+//   - Standard Indian spices are assumed always available — see Recipe Agent system prompt
+//   - Spices are referenced in recipe descriptions only, never as RecipeIngredient rows
+enum IngredientCategory {
+  VEGETABLE    // tomato, spinach, capsicum, bottle gourd, onion, garlic, ginger
+  FRUIT        // mango, banana, lemon, tamarind, coconut
+  GRAIN        // rice, wheat, oats, bajra, jowar, ragi, maida, atta, suji
+  LEGUME       // chickpeas, lentils, rajma, moong, chana dal, urad dal
+  DAIRY        // milk, paneer, curd, ghee, butter, cream, cheese
+  MEAT         // chicken, mutton, pork, lamb, goat — beef explicitly excluded
+  SEAFOOD      // prawns, fish, crabs, shellfish
+  EGG          // eggs in any form
+  NUT_AND_SEED // almonds, cashews, sesame, flaxseed, peanuts, sunflower seeds
+  OIL_AND_FAT  // mustard oil, coconut oil, sunflower oil, vanaspati — significant calorie/fat contributor
+}
+
+// ─── USER Domain ──────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  userProfile            UserProfile?
+  userGoals              UserGoal[]
+  userDietaryPreferences UserDietaryPreference[]
+  recipes                Recipe[]
+  savedRecipes           UserSavedRecipe[]
+  pantry                 Pantry[]
+  nutritionLogs          NutritionLog[]
+
+  @@map("users")
+}
+
+// Stores the physical stats needed to calculate personalised daily nutrition targets.
+// Formula input:  age + height + weight + activityLevel → TDEE (Total Daily Energy Expenditure)
+// Formula output: daily calorie target, which seeds suggested macro splits.
+// These are the INPUTS — the actual targets are stored as UserGoal rows by the backend
+// after the user completes onboarding.
+model UserProfile {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  displayName String
+  bio         String?
+
+  age           Int?
+  height        Float?
+  heightUnit    String?        // "cm" | "ft"
+  weight        Float?
+  weightUnit    String?        // "kg" | "lbs"
+  activityLevel ActivityLevel?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+// Single table for ALL goal types — both health goals and daily nutrition targets.
+// No separate NutritionTarget table needed.
+//
+// goalType is now a GoalType enum — replaces the previous free-form String.
+// This enforces valid values at the DB level and provides full TypeScript type safety.
+//
+// unit is NOT stored — it is derived from goalType in backend code (GoalService.getUnitForGoalType).
+// This eliminates the possibility of goalType/unit mismatches entirely.
+//
+// Health goal examples:
+//   goalType: LOSE_WEIGHT       targetValue: 65.0    → unit derived: "kg"
+//   goalType: MAINTAIN_WEIGHT   targetValue: 72.0    → unit derived: "kg"  (copied from UserProfile.weight)
+//   goalType: GAIN_WEIGHT       targetValue: 80.0    → unit derived: "kg"
+//
+// Daily nutrition target examples:
+//   goalType: DAILY_CALORIES    targetValue: 2200    → unit derived: "kcal"
+//   goalType: DAILY_PROTEIN     targetValue: 120     → unit derived: "g"
+//   goalType: DAILY_CARBS       targetValue: 250     → unit derived: "g"
+//   goalType: DAILY_FAT         targetValue: 70      → unit derived: "g"
+//   goalType: DAILY_FIBER       targetValue: 30      → unit derived: "g"
+//
+// Multiple active goals per user are allowed — no single-active constraint.
+// Dashboard query: filter by goalType IN [DAILY_CALORIES, DAILY_PROTEIN, DAILY_CARBS, DAILY_FAT, DAILY_FIBER]
+// replacing the previous fragile startsWith("daily_") string pattern.
+model UserGoal {
+  id          String   @id @default(uuid())
+  userId      String
+  goalType    GoalType // enum — DB-level constraint, replaces free-form String
+  targetValue Float?               // always a number; unit is derived from goalType, not stored
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_goals")
+}
+
+model DietaryPreference {
+  id            String                @id @default(uuid())
+  name          DietaryPreferenceType @unique   // enum — DB-level constraint, replaces free-form String
+  description   String?                         // human-readable UI tooltip shown in preference picker
+  llmConstraint String?                         // explicit FORBIDDEN/ALLOWED list injected into AI system prompts
+
+  userDietaryPreferences UserDietaryPreference[]
+
+  @@map("dietary_preferences")
+}
+
+model UserDietaryPreference {
+  userId              String
+  dietaryPreferenceId String
+
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dietaryPreference DietaryPreference @relation(fields: [dietaryPreferenceId], references: [id], onDelete: Cascade)
+
+  @@id([userId, dietaryPreferenceId])
+  @@map("user_dietary_preferences")
+}
+
+// ─── INGREDIENT / NUTRITION Domain ───────────────────────────────────────────
+
+model Ingredient {
+  id        String              @id @default(uuid())
+  name      String              @unique
+  category  IngredientCategory?           // enum — DB-level constraint, replaces free-form String?
+  createdAt DateTime            @default(now())
+
+  ingredientAliases IngredientAlias[]
+  foodNutrition     FoodNutrition?
+  pantryItems       PantryItem[]
+  // recipeIngredients intentionally omitted — navigation always goes Recipe→Ingredient, never reverse
+  // pantryEvents intentionally omitted — audit log always queried from pantry side, never ingredient side
+
+  @@map("ingredients")
+}
+
+// Solves the multilingual/regional name problem critical for Indian cuisine.
+// "tomato" | "tamatar" | "roma tomato" | "cherry tomato" all resolve to the same Ingredient row.
+model IngredientAlias {
+  id           String @id @default(uuid())
+  ingredientId String
+  alias        String
+
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@unique([ingredientId, alias])
+  @@map("ingredient_aliases")
+}
+
+// The application's nutrition cache and source of truth for every ingredient.
+//
+// All five Phase 1 macro columns are explicit (not JSON) so Prisma can query/sum them efficiently.
+// No micronutrients (vitamins/minerals) in Phase 1 — that is Phase 2.
+//
+// basisQty + basisUnit define what the nutrition values are measured against.
+// Both are determined by the two-call LLM Nutrition Resolver in NutritionService:
+//   Call 1 classifies the ingredient → basisUnit ("g" | "ml" | "piece")
+//   Backend maps basisUnit → basisQty via fixed rule (g/ml→100, piece→1)
+//   Call 2 fetches macros relative to that basis
+//
+// basisUnit / basisQty combinations:
+//   basisUnit: "g",     basisQty: 100  → values are per 100g   (all solids: vegetables, grains, meat)
+//   basisUnit: "ml",    basisQty: 100  → values are per 100ml  (liquids: milk, oil, coconut milk)
+//   basisUnit: "piece", basisQty: 1    → values are per 1 item (egg, banana, lemon, bread slice)
+//
+// Scaling formula (all done in backend code — never by LLM):
+//   scaled_value = (column_value / basisQty) × recipe_ingredient.quantity × log.servings
+//
+// IMPORTANT: RecipeIngredient.quantity must be expressed in the same unit as basisUnit
+//   (enforced by Recipe Agent system prompt Rule 16)
+//
+// source tracks data provenance:
+//   "llm_estimate" — LLM Nutrition Resolver estimated the value (default for all new ingredients)
+//   "manual"       — entered directly by a developer or admin
+//   "custom_model" — Phase 5+: replaced by a trained nutrition model
+//   Note: "edamam" source is no longer used — Edamam integration was removed.
+//
+// Cache behaviour:
+//   Look up by ingredientId → if missing → two-call LLM Resolver → store result as "llm_estimate"
+//   Phase 2 will backfill/replace "llm_estimate" rows with a verified nutrition database.
+model FoodNutrition {
+  id           String   @id @default(uuid())
+  ingredientId String   @unique
+  calories     Float    // kcal
+  protein      Float    // g
+  carbs        Float    // g
+  fat          Float    // g
+  fiber        Float    // g — included in Phase 1 dashboard
+  basisQty     Float    @default(100)   // quantity the values are measured against
+  basisUnit    String   @default("g")   // unit for basisQty — "g" | "ml" | "piece"
+  source       String   @default("llm_estimate") // llm_estimate | manual | custom_model
+                                                  // "edamam" removed — Edamam integration dropped in favour of
+                                                  // LLM Nutrition Resolver as the primary resolution path.
+                                                  // Phase 2 may backfill rows with verified nutrition DB values.
+  updatedAt    DateTime @updatedAt
+
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@map("food_nutrition")
+}
+
+// ─── RECIPE Domain ────────────────────────────────────────────────────────────
+
+// sourceType distinguishes AI_GENERATED recipes from USER_CREATED ones.
+// Both types share the same RecipeIngredient, RecipeVersion, RecipeStep, and
+// nutrition calculation path — no separate model needed for user-created recipes.
+//
+// USER_CREATED flow:
+//   User enters "Egg Toast" with 2 eggs + 2 bread slices
+//   → Backend creates Recipe (sourceType=USER_CREATED) + RecipeIngredient rows
+//   → NutritionService calculates recipe nutrition from FoodNutrition cache
+//   → Recipe is saved permanently
+//   → User can select it again when logging food (just pick recipe + enter servings)
+model Recipe {
+  id          String           @id @default(uuid())
+  title       String
+  cuisineType CuisineType      @default(NORTH_INDIAN)  // enum — replaces free-form String
+  sourceType  RecipeSourceType @default(AI_GENERATED)
+  isPublished Boolean          @default(false)
+  authorId    String
+  createdAt   DateTime         @default(now())
+
+  author            User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  recipeVersions    RecipeVersion[]
+  recipeIngredients RecipeIngredient[]
+  recipeTags        RecipeTag[]
+  nutritionLogs     NutritionLog[]
+  savedByUsers      UserSavedRecipe[]
+  // recipeSteps intentionally omitted — steps are now scoped to RecipeVersion, not Recipe
+  // access steps via: recipe.recipeVersions[latest].recipeSteps
+
+  @@map("recipes")
+}
+
+// Junction table — records when a user bookmarks a recipe from the feed or their own list.
+// One row per user-recipe bookmark. Composite PK prevents duplicate saves.
+// onDelete: Cascade on both sides:
+//   User deleted  → all their bookmarks are removed
+//   Recipe deleted → all bookmarks for that recipe are removed (no orphaned references)
+// savedAt enables sorting the bookmarks list by most recently saved.
+model UserSavedRecipe {
+  userId   String
+  recipeId String
+  savedAt  DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@id([userId, recipeId])
+  @@map("user_saved_recipes")
+}
+
+// Tracks each distinct version of a recipe — created on every regeneration request.
+// Enables full version history and the ability to revert to a previous version.
+//
+// description — short summary paragraph describing what this version is:
+//   e.g. "A classic creamy Palak Paneer with balanced macros."
+//   or   "High-protein version with double paneer and reduced cream."
+//   This is displayed as the recipe card subtitle in the UI.
+//
+// servings — how many servings this version of the recipe is designed for.
+//   Stored on RecipeVersion (not Recipe) because a regeneration can change the serving size.
+//   e.g. original: 4 servings → high-protein version: 2 servings (more concentrated)
+//   RecipeIngredient.quantity is always expressed per-recipe-total (not per serving).
+//   The scaling formula divides by servings at consumption time via NutritionLog.servings.
+//
+//   NO DEFAULT — always explicitly provided by the caller:
+//     - Recipe Agent receives servings from user input at generation time
+//     - USER_CREATED flow always has the user specify servings
+//   Omitting servings is a hard error, not a silent fallback. This prevents the
+//   nutrition calculation from silently running with a wrong divisor.
+//
+// recipeSteps — the actual step-by-step cooking instructions for this version.
+//   Each version has its own set of steps so regenerated recipes don't overwrite
+//   the steps of the previous version. Steps are always structured (not a paragraph).
+//
+// aiPromptUsed is null for USER_CREATED recipes (no AI involved).
+model RecipeVersion {
+  id            String   @id @default(uuid())
+  recipeId      String
+  versionNumber Int
+  description   String   // short summary of this version — displayed as subtitle in UI
+  servings      Int                    // how many servings this version makes — NO default; always set explicitly
+  aiPromptUsed  String?  // the ingredient/requirement string that produced this version; null for USER_CREATED
+  createdAt     DateTime @default(now())
+
+  recipe      Recipe       @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  recipeSteps RecipeStep[]  // structured cooking steps belonging to this specific version
+
+  @@unique([recipeId, versionNumber])
+  @@map("recipe_versions")
+}
+
+// Structured ingredient list for a recipe.
+// quantity + unit define how much of this ingredient the recipe uses.
+// The nutrition scaling formula uses these values:
+//   scaled_nutrient = (food_nutrition.value / food_nutrition.basisQty) × quantity × log.servings
+//
+// IMPORTANT: quantity must be expressed in the same unit as food_nutrition.basisUnit
+// so the scaling formula is dimensionally consistent.
+// The Recipe Agent system prompt must instruct the LLM to always express quantities
+// in grams (or the ingredient's canonical unit) to ensure correct scaling.
+model RecipeIngredient {
+  id           String  @id @default(uuid())
+  recipeId     String
+  ingredientId String
+  quantity     Float   // amount used in one serving of the recipe
+  unit         String  // must match food_nutrition.basisUnit for correct scaling
+
+  recipe     Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@map("recipe_ingredients")
+}
+
+// Stores the structured cooking instructions for a specific recipe version.
+// Linked to RecipeVersion (not Recipe directly) so each version has its own independent steps.
+//
+// This means when a recipe is regenerated (new RecipeVersion created), the new steps
+// are stored separately — the original version's steps are preserved, never overwritten.
+//
+// Example:
+//   RecipeVersion 1 of Palak Paneer → Steps 1–5 (original)
+//   RecipeVersion 2 of Palak Paneer → Steps 1–6 (high-protein tweak, different steps)
+//   Both sets of steps coexist in the DB under their respective RecipeVersion rows.
+model RecipeStep {
+  id              String @id @default(uuid())
+  recipeVersionId String                        // FK to RecipeVersion — NOT Recipe
+  stepNumber      Int
+  instruction     String
+
+  recipeVersion RecipeVersion @relation(fields: [recipeVersionId], references: [id], onDelete: Cascade)
+
+  @@map("recipe_steps")
+}
+
+model Tag {
+  id   String @id @default(uuid())
+  name String @unique // QUICK | FANCY | HEALTHY | COMFORT | OTHER
+
+  recipeTags RecipeTag[]
+
+  @@map("tags")
+}
+
+model RecipeTag {
+  recipeId String
+  tagId    String
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([recipeId, tagId])
+  @@map("recipe_tags")
+}
+
+// ─── PANTRY Domain ────────────────────────────────────────────────────────────
+
+// Unchanged from original design.
+// User → Pantry → PantryItems → Ingredients
+// The AI context builder reads pantry contents to recommend recipes the user can actually make.
+
+model Pantry {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String   @default("My Pantry")
+  createdAt DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pantryItems  PantryItem[]
+  pantryEvents PantryEvent[]
+
+  @@map("pantries")
+}
+
+model PantryItem {
+  id           String    @id @default(uuid())
+  pantryId     String
+  ingredientId String
+  quantity     Float
+  unit         String
+  addedAt      DateTime  @default(now())
+  expiresAt    DateTime?
+
+  pantry     Pantry     @relation(fields: [pantryId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@map("pantry_items")
+}
+
+// unit is copied directly from PantryItem.unit at event-creation time —
+// it is not an independent decision. Stored here so the audit log is self-contained:
+// a reader can understand "500g removed" without joining back to pantry_items.
+// Same free-form String as PantryItem.unit — no enum, for the same reasons:
+// pantry units reflect how the user stores/buys things (kg, litre, bunch, packet, etc.)
+// and cannot be restricted to a fixed list without breaking real-world usage.
+model PantryEvent {
+  id           String          @id @default(uuid())
+  pantryId     String
+  ingredientId String
+  eventType    PantryEventType
+  quantity     Float
+  unit         String          // copied from PantryItem.unit — makes event log self-contained
+  createdAt    DateTime        @default(now())
+
+  pantry     Pantry     @relation(fields: [pantryId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@map("pantry_events")
+}
+
+// ─── NUTRITION TRACKING Domain ────────────────────────────────────────────────
+
+// Replaces MealLog. Records a single consumption event:
+// "User X ate Recipe Y, N servings, at time T."
+//
+// No MealPlan or MealPlanItem — there is no scheduling system in Phase 1.
+// mealType is optional and purely descriptive (labels when in the day the meal occurred).
+// servings scales the per-recipe nutrition to the actual amount consumed.
+//
+// Dashboard computation (all arithmetic in backend, no LLM):
+//   1. Fetch today's NutritionLog rows for the user.
+//   2. For each log → join RecipeIngredient → join FoodNutrition.
+//   3. For each ingredient:
+//        contribution = (food_nutrition.value / food_nutrition.basisQty)
+//                       × recipe_ingredient.quantity
+//                       × nutrition_log.servings
+//   4. Sum contributions across all ingredients in the recipe.
+//   5. Sum recipe totals across all logs for the day.
+//   6. Compare daily totals to UserGoal rows (goalType: "daily_*") for progress display.
+//
+// Phase 1 dashboard tracks: calories, protein, carbs, fat, fiber.
+// Phase 2 will add micronutrients (vitamins, minerals) — no schema change needed then.
+model NutritionLog {
+  id       String    @id @default(uuid())
+  userId   String
+  recipeId String
+  servings Float     @default(1)   // how many servings of the recipe were consumed
+  mealType MealType?               // optional — descriptive label, not a planning field
+  loggedAt DateTime  @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id])
+
+  @@map("nutrition_logs")
+}

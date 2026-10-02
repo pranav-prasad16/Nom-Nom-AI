@@ -1,0 +1,28 @@
+{
+  "name": "nom-nom-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:api": "pnpm --filter api dev",
+    "dev:mobile": "pnpm --filter mobile start",
+    "build:api": "pnpm --filter api build",
+    "db:migrate": "pnpm --filter api db:migrate",
+    "db:seed": "pnpm --filter api db:seed",
+    "db:studio": "pnpm --filter api db:studio",
+    "podman:up": "podman-compose up --build",
+    "podman:up:detached": "podman-compose up --build -d",
+    "podman:down": "podman-compose down",
+    "podman:postgres": "podman-compose up -d postgres",
+    "podman:logs": "podman-compose logs -f api",
+    "podman:migrate": "podman exec nom-nom-api npx prisma migrate deploy",
+    "podman:seed": "podman exec nom-nom-api npx prisma db seed",
+    "podman:build": "podman build -t nom-nom-api -f apps/api/Dockerfile ."
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}
