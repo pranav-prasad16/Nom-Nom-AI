@@ -1,2 +1,16 @@
 packages:
   - "apps/*"
+
+# pnpm v9.15+ reads project settings from this file, not from package.json "pnpm" field.
+# onlyBuiltDependencies: allow native postinstall/build scripts for these packages only.
+# Without this, pnpm v9+ blocks lifecycle scripts by default (ERR_PNPM_IGNORED_BUILDS).
+#
+#   @prisma/client, @prisma/engines, prisma — generate the Prisma query engine binary
+#   bcrypt                                  — compiles a native C++ bcrypt addon
+#   esbuild                                 — downloads the platform-correct binary
+onlyBuiltDependencies:
+  - "@prisma/client"
+  - "@prisma/engines"
+  - prisma
+  - bcrypt
+  - esbuild

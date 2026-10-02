@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { PrismaClient, GoalType } from '@prisma/client';
 import { requireAuth, AuthRequest } from '../middleware/requireAuth';
 
-const router = Router();
+const router: Router = Router();
 const prisma = new PrismaClient();
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────

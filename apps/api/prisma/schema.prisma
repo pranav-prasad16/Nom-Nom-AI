@@ -330,8 +330,11 @@ model Ingredient {
   ingredientAliases IngredientAlias[]
   foodNutrition     FoodNutrition?
   pantryItems       PantryItem[]
-  // recipeIngredients intentionally omitted — navigation always goes Recipe→Ingredient, never reverse
-  // pantryEvents intentionally omitted — audit log always queried from pantry side, never ingredient side
+  // Back-relations required by Prisma v5 schema validator (both sides of a relation must be declared).
+  // In practice the code never navigates Ingredient→Recipe or Ingredient→PantryEvent —
+  // the direction is always Recipe→Ingredient and Pantry→PantryEvent.
+  recipeIngredients RecipeIngredient[]
+  pantryEvents      PantryEvent[]
 
   @@map("ingredients")
 }

@@ -4,7 +4,7 @@ import { PrismaClient, CuisineType } from '@prisma/client';
 import { requireAuth, AuthRequest } from '../middleware/requireAuth';
 import { AIProviderFactory } from '../ai/AIProviderFactory';
 
-const router = Router();
+const router: Router = Router();
 const prisma = new PrismaClient();
 
 const generateSchema = z.object({
@@ -71,7 +71,7 @@ router.post('/generate', requireAuth, async (req: AuthRequest, res: Response) =>
   const recipe = await prisma.recipe.create({
     data: {
       title: result.name,
-      cuisineType: result.cuisineType,
+      cuisineType: result.cuisineType as CuisineType,
       isPublished: false,
       authorId: req.user!.id,
       recipeVersions: {

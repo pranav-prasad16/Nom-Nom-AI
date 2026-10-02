@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient, CuisineType } from '@prisma/client';
+import { PrismaClient, CuisineType, Prisma } from '@prisma/client';
 
-const router = Router();
+const router: Router = Router();
 const prisma = new PrismaClient();
 
 // ─── GET /api/feed ────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ router.get('/', async (req: Request, res: Response) => {
     ? (cuisine as CuisineType)
     : undefined;
 
-  const where: Parameters<typeof prisma.recipe.findMany>[0]['where'] = {
+  const where: Prisma.RecipeWhereInput = {
     isPublished: true,
     ...(validCuisine ? { cuisineType: validCuisine } : {}),
     ...(tag

@@ -5,7 +5,7 @@ import { requireAuth, AuthRequest } from '../middleware/requireAuth';
 import { AIProviderFactory } from '../ai/AIProviderFactory';
 import CookingSessionStore from '../services/CookingSessionStore';
 
-const router = Router();
+const router: Router = Router();
 const prisma = new PrismaClient();
 
 const startSessionSchema = z.object({

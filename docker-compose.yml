@@ -1,12 +1,19 @@
 # ─── Podman Compose ───────────────────────────────────────────────────────────
-# Run with:  podman-compose up --build
-# Stop with: podman-compose down
+# Workflow:
+#   1. Build the API image first:  podman build -t nom-nom-api -f apps/api/Dockerfile .
+#                              or: pnpm podman:build
+#   2. Start all containers:       podman-compose up -d
+#                              or: pnpm podman:up
+#   3. Stop all containers:        podman-compose down
+#                              or: pnpm podman:down
+#
+# NOTE: podman-compose 1.x has a bug where it ignores the "dockerfile:" key and
+# fails when the build context path contains spaces. The API service therefore
+# uses "image:" instead of "build:". Run  pnpm podman:build  whenever source
+# changes, then  pnpm podman:up  to restart with the new image.
 #
 # Podman runs rootless by default. The API container already uses a non-root
 # user (appuser) in the Dockerfile, so no extra changes are needed there.
-#
-# On Linux/macOS: containers share the default podman network automatically.
-# On Windows (Podman Desktop): the Podman Machine provides the same behaviour.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -31,9 +38,10 @@ services:
       retries: 5
 
   api:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    # Pre-built image. Rebuild with: podman build -t nom-nom-api -f apps/api/Dockerfile .
+    # podman-compose 1.x cannot resolve a "dockerfile:" path when the context
+    # directory contains spaces — using "image:" is the reliable workaround.
+    image: localhost/nom-nom-api:latest
     container_name: nom-nom-api
     restart: on-failure
     depends_on:

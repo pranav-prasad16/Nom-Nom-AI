@@ -9,8 +9,7 @@
     "db:migrate": "pnpm --filter api db:migrate",
     "db:seed": "pnpm --filter api db:seed",
     "db:studio": "pnpm --filter api db:studio",
-    "podman:up": "podman-compose up --build",
-    "podman:up:detached": "podman-compose up --build -d",
+    "podman:up": "podman-compose up -d",
     "podman:down": "podman-compose down",
     "podman:postgres": "podman-compose up -d postgres",
     "podman:logs": "podman-compose logs -f api",
@@ -24,5 +23,14 @@
   "engines": {
     "node": ">=20",
     "pnpm": ">=9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "bcrypt",
+      "esbuild"
+    ]
   }
 }

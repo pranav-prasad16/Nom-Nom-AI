@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { Application } from 'express';
 import cors from 'cors';
 
 import authRouter from './routes/auth';
@@ -12,7 +12,7 @@ import feedRouter from './routes/feed';
 import suggestionsRouter from './routes/suggestions';
 import cookingRouter from './routes/cooking';
 
-const app = express();
+const app: Application = express();
 const PORT = process.env.PORT ?? 3000;
 
 app.use(cors());

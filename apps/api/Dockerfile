@@ -1,63 +1,60 @@
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
-# Installs ALL dependencies (dev + prod) and compiles TypeScript.
-# Podman note: runs rootless by default — no privileged instructions used here.
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Build tools for native addons:
+#   python3 + make + g++ → needed to compile bcrypt from source (no musl prebuilt)
+#   openssl + openssl-dev → needed by @prisma/engines at install time
+RUN apk add --no-cache python3 make g++ openssl openssl-dev
 
-# Copy workspace manifests first (layer-cache friendly)
-COPY package.json pnpm-workspace.yaml ./
+# Pin pnpm to 9.14 — the last version where onlyBuiltDependencies lives in
+# package.json. v9.15+ moved it to pnpm-workspace.yaml which isn't reliably
+# read inside Docker build layers.
+RUN npm install -g pnpm@9.14
+
+# Copy manifests before source for layer-cache efficiency.
+COPY package.json pnpm-workspace.yaml .npmrc ./
 COPY apps/api/package.json ./apps/api/
 
-# Install all deps (dev included — needed for tsc + prisma generate).
-# No --frozen-lockfile: project does not commit a lockfile.
-RUN pnpm install
+# --shamefully-hoist: writes ALL packages flat into node_modules/ (npm-style).
+# Without this, pnpm uses symlinks into node_modules/.pnpm — those symlinks are
+# not preserved when COPY transfers the directory to the runner stage.
+RUN pnpm install --shamefully-hoist
 
-# Copy the full API source
+# Copy source + schema, generate Prisma client, compile TypeScript
 COPY apps/api ./apps/api
-
-# Generate Prisma client (must run after source copy so schema.prisma is present)
 RUN pnpm --filter api db:generate
-
-# Compile TypeScript → dist/
 RUN pnpm --filter api build
 
 # ─── Stage 2: Production ─────────────────────────────────────────────────────
-# Lean image — only the compiled output, Prisma client, and production node_modules.
 FROM node:20-alpine AS runner
 
-# Non-root user — aligns with Podman's rootless model and is a security best-practice.
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# openssl at runtime: @prisma/client needs it to talk to Postgres over TLS.
+# Non-root user: aligns with Podman rootless and is a security best-practice.
+RUN apk add --no-cache openssl && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
 
-# Copy workspace manifests (needed so pnpm workspace resolution works at runtime)
-COPY package.json pnpm-workspace.yaml ./
+# Workspace manifests
+COPY package.json pnpm-workspace.yaml .npmrc ./
 COPY apps/api/package.json ./apps/api/
 
-# Copy the full node_modules from the builder stage instead of re-running pnpm install.
-# This is faster, avoids a second network fetch inside the container, and works
-# reliably in rootless Podman where home-dir write permissions can vary.
-COPY --from=builder /app/node_modules ./node_modules
+# Flat node_modules copied directly — no pnpm, no network, no symlink issues.
+COPY --from=builder /app/node_modules         ./node_modules
 
-# Copy compiled JS output
-COPY --from=builder /app/apps/api/dist ./apps/api/dist
+# Compiled JS
+COPY --from=builder /app/apps/api/dist        ./apps/api/dist
 
-# Copy Prisma schema + generated client (both needed at runtime for migrate & query)
-COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
-COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
+# Prisma schema + generated client (both needed at runtime)
+COPY --from=builder /app/apps/api/prisma      ./apps/api/prisma
 
-# Entrypoint script: runs pending migrations then starts the server.
-# Using a shell script lets podman-compose restart the container cleanly on failure.
+# Entrypoint: runs migrations, then starts the server
 COPY apps/api/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Hand everything over to the non-root user
 RUN chown -R appuser:appgroup /app
-
 USER appuser
 
 WORKDIR /app/apps/api
