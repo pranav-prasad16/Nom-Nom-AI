@@ -1,38 +1,75 @@
 # ==============================================================================
 # Nom Nom AI - End-to-End API Test Suite
 # ==============================================================================
+# Why 172.28.233.147 and not localhost?
+#   Podman on Windows runs containers inside a WSL2 VM. That VM gets its own
+#   IP on the WSL2 virtual network (172.28.x.x). Podman binds container ports
+#   to 0.0.0.0 *inside the VM*, not to Windows' localhost. Until a .wslconfig
+#   mirrored-networking entry is added, you must use the WSL2 VM's IP directly.
+#   Run:  wsl -d podman-machine-default -- ip addr show eth0
+#   to find the current IP (it can change on VM restart).
+#
 # Usage:
 #   .\test-api.ps1
 #   .\test-api.ps1 -BaseUrl "http://172.28.233.147:3000"
+#   .\test-api.ps1 -BaseUrl "http://localhost:3000" -OutFile ".\test-results\run.log"
 # ==============================================================================
 
 param (
-    [string]$BaseUrl = "http://172.28.233.147:3000"
+    [string]$BaseUrl = "http://172.28.233.147:3000",
+    [string]$OutFile = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $PassCount = 0
 $FailCount = 0
+$Results   = [System.Collections.Generic.List[PSCustomObject]]::new()
+$RunStart  = Get-Date
+
+# ─── Output helper ───────────────────────────────────────────────────────────
+# Writes to the console AND appends to $OutFile when one is specified.
+function Write-Out {
+    param([string]$Message, [string]$Color = "White")
+    Write-Host $Message -ForegroundColor $Color
+    if ($OutFile) { Add-Content -Path $OutFile -Value $Message }
+}
 
 function Run-Test {
     param (
         [string]$Name,
         [scriptblock]$Script
     )
-    Write-Host -NoNewline "  [$Name] ... "
+    $start = Get-Date
+    Write-Out -Message "  [$Name] ... " -Color Gray
     try {
         & $Script
-        Write-Host "PASSED" -ForegroundColor Green
+        $elapsed = ((Get-Date) - $start).TotalMilliseconds
+        Write-Out -Message "  PASSED  ($([int]$elapsed) ms)" -Color Green
         $script:PassCount++
+        $script:Results.Add([PSCustomObject]@{ Test=$Name; Status="PASS"; Ms=[int]$elapsed; Error="" })
     } catch {
-        Write-Host "FAILED" -ForegroundColor Red
-        Write-Host "    Error: $($_.Exception.Message)" -ForegroundColor DarkRed
+        $elapsed = ((Get-Date) - $start).TotalMilliseconds
+        $errMsg  = $_.Exception.Message
+        Write-Out -Message "  FAILED  ($([int]$elapsed) ms)" -Color Red
+        Write-Out -Message "    Error: $errMsg"              -Color DarkRed
         $script:FailCount++
+        $script:Results.Add([PSCustomObject]@{ Test=$Name; Status="FAIL"; Ms=[int]$elapsed; Error=$errMsg })
     }
 }
 
-Write-Host "`n🚀 Starting Nom Nom AI API Test Suite against: $BaseUrl`n" -ForegroundColor Cyan
+# ─── Prepare output file ─────────────────────────────────────────────────────
+if ($OutFile) {
+    $dir = Split-Path $OutFile
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    Set-Content -Path $OutFile -Value ""   # clear previous run
+}
+
+Write-Out "`n============================================================" Cyan
+Write-Out " Nom Nom AI  -  API Test Suite" Cyan
+Write-Out " Target : $BaseUrl" Cyan
+Write-Out " Started: $($RunStart.ToString('yyyy-MM-dd HH:mm:ss'))" Cyan
+Write-Out "============================================================`n" Cyan
 
 # ─── 1. Health Check ─────────────────────────────────────────────────────────
 Run-Test "GET /health - System Health Check" {
@@ -127,7 +164,6 @@ Run-Test "GET /api/ingredients/search - Query Ingredients Database" {
 $pantryItemId = $null
 
 Run-Test "POST /api/pantry/items - Add Item to Pantry" {
-    # If no seeded ingredient found, search for anything or fallback
     if (-not $script:ingredientId) {
         $all = Invoke-RestMethod -Uri "$BaseUrl/api/ingredients/search?q=a" -Method GET -Headers $authHeaders
         if ($all.Count -gt 0) { $script:ingredientId = $all[0].id }
@@ -148,7 +184,7 @@ Run-Test "POST /api/pantry/items - Add Item to Pantry" {
         $script:pantryItemId = $res.id
         if (-not $res.id) { throw "No pantry item ID returned" }
     } else {
-        Write-Host -NoNewline " (Skipped: no ingredients seeded) " -ForegroundColor Yellow
+        Write-Out "    (Skipped: no ingredients seeded)" Yellow
     }
 }
 
@@ -303,9 +339,27 @@ Run-Test "POST /api/cooking/sessions - Initialize Cooking Assistant" {
     }
 }
 
-# ─── Test Summary ────────────────────────────────────────────────────────────
-Write-Host "`n=================================================="
-Write-Host " Test Suite Completed" -ForegroundColor Cyan
-Write-Host " Passed: $PassCount" -ForegroundColor Green
-Write-Host " Failed: $FailCount" -ForegroundColor $(if ($FailCount -gt 0) { "Red" } else { "Green" })
-Write-Host "==================================================`n"
+# ─── Summary ─────────────────────────────────────────────────────────────────
+$totalMs = [int]((Get-Date) - $RunStart).TotalMilliseconds
+$summaryColor = if ($FailCount -gt 0) { "Red" } else { "Green" }
+
+Write-Out "`n============================================================" Cyan
+Write-Out " Test Suite Completed  ($totalMs ms total)" Cyan
+Write-Out " Passed : $PassCount" Green
+Write-Out " Failed : $FailCount" $summaryColor
+Write-Out "============================================================`n" Cyan
+
+# ─── Structured result table ─────────────────────────────────────────────────
+Write-Out "`n--- Result Table ---" Gray
+$Results | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Out $_ Gray }
+
+# ─── Write CSV for CI / spreadsheet import ───────────────────────────────────
+if ($OutFile) {
+    $csvPath = [System.IO.Path]::ChangeExtension($OutFile, ".csv")
+    $Results | Export-Csv -Path $csvPath -NoTypeInformation
+    Write-Out "Log  saved: $OutFile"  Cyan
+    Write-Out "CSV  saved: $csvPath"  Cyan
+}
+
+# Return non-zero exit code when any test failed (useful for CI pipelines)
+if ($FailCount -gt 0) { exit 1 }
