@@ -34,3 +34,6 @@ apps/mobile/expo-env.d.ts
 # --- Temporary / Misc ---------------------------------------------------------
 *.tgz
 .cache/
+
+# --- Test output logs ---
+test-results/
