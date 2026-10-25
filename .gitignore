@@ -1,0 +1,36 @@
+# --- Environment / Secrets ----------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- Dependencies -------------------------------------------------------------
+node_modules/
+
+# --- Build Outputs ------------------------------------------------------------
+dist/
+build/
+out/
+
+# --- Prisma generated client (regenerated via `prisma generate`) -------------
+apps/api/node_modules/.prisma/
+
+# --- Logs ---------------------------------------------------------------------
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- OS and Editor ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Expo / React Native ------------------------------------------------------
+apps/mobile/.expo/
+apps/mobile/expo-env.d.ts
+
+# --- Temporary / Misc ---------------------------------------------------------
+*.tgz
+.cache/
