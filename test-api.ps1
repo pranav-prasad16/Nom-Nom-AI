@@ -17,7 +17,7 @@
 
 param (
     [string]$BaseUrl = "http://172.28.233.147:3000",
-    [string]$OutFile = ""
+    [string]$OutFile = ".\test-results\latest-run.log"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,14 +25,14 @@ $ErrorActionPreference = "Stop"
 $PassCount = 0
 $FailCount = 0
 $Results   = [System.Collections.Generic.List[PSCustomObject]]::new()
+$LogBuffer = [System.Collections.Generic.List[string]]::new()
 $RunStart  = Get-Date
 
 # ─── Output helper ───────────────────────────────────────────────────────────
-# Writes to the console AND appends to $OutFile when one is specified.
 function Write-Out {
-    param([string]$Message, [string]$Color = "White")
+    param([string]$Message = "", [string]$Color = "White")
     Write-Host $Message -ForegroundColor $Color
-    if ($OutFile) { Add-Content -Path $OutFile -Value $Message }
+    $script:LogBuffer.Add($Message)
 }
 
 function Run-Test {
@@ -41,28 +41,24 @@ function Run-Test {
         [scriptblock]$Script
     )
     $start = Get-Date
-    Write-Out -Message "  [$Name] ... " -Color Gray
+    Write-Host -NoNewline "  [$Name] ... " -ForegroundColor Gray
     try {
         & $Script
         $elapsed = ((Get-Date) - $start).TotalMilliseconds
-        Write-Out -Message "  PASSED  ($([int]$elapsed) ms)" -Color Green
+        Write-Host "PASSED  ($([int]$elapsed) ms)" -ForegroundColor Green
+        $script:LogBuffer.Add("  [$Name] ... PASSED  ($([int]$elapsed) ms)")
         $script:PassCount++
         $script:Results.Add([PSCustomObject]@{ Test=$Name; Status="PASS"; Ms=[int]$elapsed; Error="" })
     } catch {
         $elapsed = ((Get-Date) - $start).TotalMilliseconds
         $errMsg  = $_.Exception.Message
-        Write-Out -Message "  FAILED  ($([int]$elapsed) ms)" -Color Red
-        Write-Out -Message "    Error: $errMsg"              -Color DarkRed
+        Write-Host "FAILED  ($([int]$elapsed) ms)" -ForegroundColor Red
+        Write-Host "    Error: $errMsg" -ForegroundColor DarkRed
+        $script:LogBuffer.Add("  [$Name] ... FAILED  ($([int]$elapsed) ms)")
+        $script:LogBuffer.Add("    Error: $errMsg")
         $script:FailCount++
         $script:Results.Add([PSCustomObject]@{ Test=$Name; Status="FAIL"; Ms=[int]$elapsed; Error=$errMsg })
     }
-}
-
-# ─── Prepare output file ─────────────────────────────────────────────────────
-if ($OutFile) {
-    $dir = Split-Path $OutFile
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-    Set-Content -Path $OutFile -Value ""   # clear previous run
 }
 
 Write-Out "`n============================================================" Cyan
@@ -351,14 +347,34 @@ Write-Out "============================================================`n" Cyan
 
 # ─── Structured result table ─────────────────────────────────────────────────
 Write-Out "`n--- Result Table ---" Gray
-$Results | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Out $_ Gray }
+$tableStr = $Results | Format-Table -AutoSize | Out-String
+Write-Host $tableStr -ForegroundColor Gray
+$LogBuffer.Add($tableStr)
 
-# ─── Write CSV for CI / spreadsheet import ───────────────────────────────────
+# ─── Write Log, CSV & timestamped history files ──────────────────────────────
 if ($OutFile) {
+    $dir = Split-Path $OutFile
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+
+    # 1. Write the latest log
+    $LogBuffer | Set-Content -Path $OutFile -Encoding UTF8
+
+    # 2. Write the latest CSV
     $csvPath = [System.IO.Path]::ChangeExtension($OutFile, ".csv")
-    $Results | Export-Csv -Path $csvPath -NoTypeInformation
-    Write-Out "Log  saved: $OutFile"  Cyan
-    Write-Out "CSV  saved: $csvPath"  Cyan
+    $Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+
+    # 3. Save timestamped history copies
+    $timestamp = $RunStart.ToString("yyyyMMdd-HHmmss")
+    $historyLog = Join-Path $dir "run-$timestamp.log"
+    $historyCsv = Join-Path $dir "run-$timestamp.csv"
+    Copy-Item -Path $OutFile -Destination $historyLog -Force
+    Copy-Item -Path $csvPath -Destination $historyCsv -Force
+
+    Write-Host "`nLogs saved:" -ForegroundColor Cyan
+    Write-Host "  Latest Log  : $OutFile"    -ForegroundColor Green
+    Write-Host "  Latest CSV  : $csvPath"    -ForegroundColor Green
+    Write-Host "  History Log : $historyLog" -ForegroundColor DarkCyan
+    Write-Host "  History CSV : $historyCsv" -ForegroundColor DarkCyan
 }
 
 # Return non-zero exit code when any test failed (useful for CI pipelines)
